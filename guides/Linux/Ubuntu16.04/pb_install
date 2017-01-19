@@ -1,0 +1,231 @@
+#!/usr/bin/env bash
+#
+# Author:  F. Mauger
+# Date:    2017-01-18
+# License: GPL 3.0
+#
+# This Bash script aims to download, build and install the
+# Google Protocol Buffers software on Ubuntu 16.04 LTS.
+#
+
+pb_install_version="0.1"
+
+opwd=$(pwd)
+debug=0
+base_dir="/opt/sw/alternative/GoogleProtocolBuffers"
+install_dir=
+pb_version="3.0.0"
+pb_with_java=1
+pb_setup_script="${HOME}/.bashrc.protobuf"
+target_distrib_id="Ubuntu"
+target_distrib_release="16.04"
+
+function pb_install_exit()
+{
+    local error_code=$1
+    shift 1
+    local error_msg="$@"
+    if [ -n "${error_msg}" ]; then
+	echo >&2 "[error] ${error_msg}"
+    fi
+    cd ${opwd}
+    exit ${error_code}
+}
+
+function pb_install_help()
+{
+    cat<<EOF
+
+pb_install - Google Protocol Buffer installation script for ${target_distrib_id} (${target_distrib_release})
+
+Usage: pb_install [options]
+
+Options:
+ --help        Print this help then exit
+ --debug       Print debug message
+ --base-dir DIR
+               Set the build/installation base directory
+               (default=${base_dir})
+ --no-java     Do not install Java support
+ --protobuf-setup-script FILENAME
+               Set the filename of the sample Bash setup script
+               (default=${pb_setup_script})
+
+Note: Some operations require root privilege (sudo).
+
+EOF
+    return 0
+}
+
+function pb_install_cli_dialog()
+{
+    while [ -n "$1" ]; do
+	local opt="$1"
+	# echo >&2 "[devel] opt = '${opt}'"
+	if [ "$opt" = "--help" ]; then
+	    pb_install_help
+	    pb_install_exit 0
+	elif [ "$opt" = "--debug" ]; then
+	    debug=1
+	elif [ "$opt" = "--base-dir" ]; then
+	    shift 1
+	    base_dir="$1"
+	elif [ "$opt" = "--no-java" ]; then
+	    pb_with_java=0
+	elif [ "$opt" = "--protobuf-setup-script" ]; then
+	    shift 1
+	    pb_setup_script="$1"
+	fi
+	shift 1
+    done
+    echo >&2 "[info] Base directory        = '${base_dir}'"
+    echo >&2 "[info] Build/install Java    = '${pb_with_java}'"
+    echo >&2 "[info] Protobuf setup script = '${pb_setup_script}'"
+    return 0
+}
+
+function pb_install_setup()
+{
+    test ${debug} && echo >&2 "[debug] pb_install_setup: Entering..."
+    local pb_version_compact=$(echo ${pb_version} | tr -d '.')
+    touch ${pb_setup_script}
+    cat > ${pb_setup_script} <<EOF
+export PROTOBUF_BASE_DIR=${PROTOBUF_BASE_DIR}
+function do_protobuf_${pb_version_compact}_setup()
+{
+  if [ -n "${PROTOBUF_INSTALL_DIR}" ]; then
+    echo >&2 "[warning] Google Protocol Buffers ${pb_version} is already setup !"
+    return 1
+  fi
+  export PROTOBUF_INSTALL_DIR="\${PROTOBUF_BASE_DIR}/install-${pb_version}"
+  export PATH="\${PROTOBUF_INSTALL_DIR}/bin:\${PATH}"
+  echo >&2 "[notice]: Google Protocol Buffers ${pb_version} is now setup."
+  return 0;
+}
+export -f do_protobuf_${pb_version_compact}_setup
+
+# Special aliases:
+alias protobuf_setup="do_protobuf_${pb_version_compact}_setup"
+
+EOF
+    test ${debug} && echo >&2 "[debug] pb_install_setup: Exiting."
+    return 0
+}
+
+function pb_install_java()
+{
+    test ${debug} && echo >&2 "[debug] pb_install_java: Entering..."
+    export PATH="${PROTOBUF_INSTALL_DIR}/bin:${PATH}"
+    cd ${PROTOBUF_BASE_DIR}/protobuf-${pb_version}/java
+    mvn test
+    mvn install
+    mvn package
+    # find . -name "protobuf-*.jar"
+    mkdir -p ${PROTOBUF_INSTALL_DIR}/lib/java
+    cp ./core/target/protobuf-java-${pb_version}.jar      ${PROTOBUF_INSTALL_DIR}/lib/java
+    cp ./util/target/protobuf-java-util-${pb_version}.jar ${PROTOBUF_INSTALL_DIR}/lib/java
+    test ${debug} && echo >&2 "[debug] pb_install_java: Exiting."
+    return 0
+}
+
+function pb_install_core()
+{
+    test ${debug} && echo >&2 "[debug] pb_install_core: Entering..."
+    export PROTOBUF_BASE_DIR="${base_dir}"
+    mkdir -p ${PROTOBUF_BASE_DIR}
+    cd ${PROTOBUF_BASE_DIR}
+    wget https://github.com/google/protobuf/releases/download/v${pb_version}/protobuf-cpp-${pb_version}.tar.gz
+    wget https://github.com/google/protobuf/releases/download/v${pb_version}/protobuf-java-${pb_version}.tar.gz
+    tar xvzf protobuf-cpp-${pb_version}.tar.gz
+    tar xvzf protobuf-java-${pb_version}.tar.gz
+    export PROTOBUF_INSTALL_DIR=${PROTOBUF_BASE_DIR}/install-${pb_version}
+    cd ${PROTOBUF_BASE_DIR}/protobuf-${pb_version}/
+    ./autogen.sh
+    ./configure --help
+    ./configure --prefix=${PROTOBUF_INSTALL_DIR}
+    make -j4
+    make check
+    make install
+    if [ ${pb_with_java} -ne 0 ]; then
+	pb_install_java
+    fi
+    test ${debug} && echo >&2 "[debug] pb_install_core: Exiting."
+    return 0
+}
+
+function pb_install_check()
+{
+    distrib_id=$(cat /etc/lsb-release | grep DISTRIB_ID | cut -d= -f2)
+    if [ "${distrib_id}" != "${target_distrib_id}" ]; then
+	echo >&2 "[error] Your system is not ${target_distrib_id}!"
+	return 1
+    fi
+
+    distrib_release=$(cat /etc/lsb-release | grep DISTRIB_RELEASE | cut -d= -f2)
+    if [ "${distrib_release}" != "${target_distrib_release}" ]; then
+	echo >&2 "[error] Your Ubuntu system is not ${target_distrib_release}!"
+	return 1
+    fi
+
+    dependencies="autoconf automake libtool curl make g++ unzip"
+    if [ ${pb_with_java} -ne 0 ]; then
+	which mvn >/dev/null 2>&1
+	if [ $? -ne 0 ]; then
+	    # default-jdk default-jdk-doc maven
+	    dependencies="${dependencies} default-jdk maven"
+	fi
+    fi
+
+    for dep in ${dependencies}
+    do
+	dep_check=$(dpkg -l | grep " ${dep} " | tr -s [[:space:]] | cut -d' ' -f2)
+	if [ "${dep_check}" = "x" ]; then
+	    echo >&2 "[info] Attempt to install dependency '${dep}'..."
+	    sudo apt-get install ${dep}
+	    if [ $? -ne 0 ]; then
+		echo >&2 "[error] Cannot install dependency '${dep}'!"
+		return 1
+	    fi
+	fi
+    done
+
+    return 0
+}
+
+function pb_install_main()
+{
+
+    pb_install_check
+    if [ $? -ne 0 ]; then
+	echo >&2 "[error] Basic checks failed!"
+	return 1
+    fi
+
+    pb_install_cli_dialog $@
+    if [ $? -ne 0 ]; then
+	echo >&2 "[error] CLI dialog failed!"
+	return 1
+    fi
+
+    # pb_install_core
+    # if [ $? -ne 0 ]; then
+    # 	echo >&2 "[error] Installation failed!"
+    # 	return 1
+    # fi
+
+    pb_install_setup
+    if [ $? -ne 0 ]; then
+	echo >&2 "[error] Setup script failed!"
+	return 1
+    fi
+
+    return 0
+}
+
+pb_install_main $@
+if [ $? -ne 0 ]; then
+    pb_install_exit 1 "Protobuf installation failed!"
+fi
+pb_install_exit 0
+
+# end
